@@ -1,0 +1,25 @@
+allprojects {
+    afterEvaluate { project ->
+        project.tasks.register("listDependencies") {
+            doLast {
+                def outputPath = project.findProperty("scanOutputPath")
+                if (!outputPath) {
+                    throw new GradleException("scanOutputPath property not set")
+                }
+                def list = [] // as Set
+                project.configurations.findByName("runtimeClasspath")?.resolvedConfiguration
+                        ?.firstLevelModuleDependencies?.each { dep -> collectDep(dep, list, null, 0) }
+                new File(outputPath).text = groovy.json.JsonOutput.toJson(list) // as List)
+            }
+        }
+    }
+}
+
+def collectDep(dep, list, parentId, level) {
+    def id = "${dep.moduleGroup}:${dep.moduleName}:${dep.moduleVersion}"
+    list << [id: id, parent: parentId, level: level]
+    dep.children.each { child -> collectDep(child, list, id, level + 1) }
+//    if (seen.add(id)) {              // Set.add returns false if already present
+//        dep.children.each { child -> collectDep(child, seen, level + 1) }
+//    }
+}
