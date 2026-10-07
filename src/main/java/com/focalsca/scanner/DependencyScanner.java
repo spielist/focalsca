@@ -1,6 +1,7 @@
 package com.focalsca.scanner;
 
 import java.util.*;
+import java.util.stream.Stream;
 
 import com.focalsca.model.Dependency;
 import com.focalsca.model.DependencyScanResult;
@@ -13,24 +14,27 @@ public class DependencyScanner {
 
     public List<DependencyScanResult> scan(List<Dependency> dependencyList, UpgradePolicy upgradePolicy) {
 
-        HashMap<String, DependencyScanResult> uniqueScanResults = new HashMap<>();
         OsvClient osv = new OsvClient();
+        HashMap<String, DependencyScanResult> uniqueScanResults = new HashMap<>();
 
-        List<DependencyScanResult> list = dependencyList.stream().map(dependency -> {
-            DependencyScanResult prevResult = uniqueScanResults.get(dependency.toCoordinate());
-            if (prevResult == null) {
-                List<Vulnerability> vulns = osv.query(dependency);
-                DependencyScanResult result = new DependencyScanResult(dependency, vulns);
-                uniqueScanResults.put(dependency.toCoordinate(), result);
-                return result;
-            } else {
-                return new DependencyScanResult(dependency, prevResult.getVulnerabilities());
-            }
-        }).toList();
+        List<DependencyScanResult> list = dependencyList.stream()
+                .flatMap(DependencyScanner::flatten)
+                .map(dependency -> {
+                    DependencyScanResult prevResult = uniqueScanResults.get(dependency.toCoordinate());
+                    if (prevResult == null) {
+                        List<Vulnerability> vulns = osv.query(dependency);
+                        DependencyScanResult result = new DependencyScanResult(dependency, vulns);
+                        uniqueScanResults.put(dependency.toCoordinate(), result);
+                        return result;
+                    } else {
+                        return new DependencyScanResult(dependency, prevResult.getVulnerabilities());
+                    }
+                }).toList();
 
         list.forEach(result -> {
-            if (result.getDependency().isDirect()) {
-                DependencyScanResult cached = uniqueScanResults.get(result.getDependency().toCoordinate());
+            Dependency dependency = result.getDependency();
+            if (dependency.isDirect()) {
+                DependencyScanResult cached = uniqueScanResults.get(dependency.toCoordinate());
                 if (cached != null && cached.getSameMajorFix() == null) {
                     cached.setSameMajorFix(getBestFixVersion(osv, cached, 0,
                             new HashSet<>(), UpgradePolicy.SAME_MAJOR));
@@ -44,6 +48,11 @@ public class DependencyScanner {
 
         return list;
 
+    }
+
+    private static Stream<Dependency> flatten(Dependency dependency) {
+        return Stream.concat(Stream.of(dependency),
+                dependency.getChildren().stream().flatMap(DependencyScanner::flatten));
     }
 
     public FixVersionResult getBestFixVersion(OsvClient osv, DependencyScanResult result,
@@ -78,7 +87,8 @@ public class DependencyScanner {
         Dependency fixCandidate = Dependency.fromCoordinate(
                 result.getDependency().getGroupId() + ":" +
                         result.getDependency().getArtifactId() + ":" +
-                        candidate
+                        candidate, result.getDependency().getFile(),
+                result.getDependency().getLine()
         );
 
         List<Vulnerability> fixVulns = osv.query(fixCandidate);
@@ -94,4 +104,17 @@ public class DependencyScanner {
         // If no better fix found, return the candidate we have with its vuln count
         return betterFix != null ? betterFix : new FixVersionResult(candidate, fixVulns);
     }
+
+    private List<Vulnerability> collectVulnerabilities(Dependency dependency, HashMap<String, DependencyScanResult> uniqueScanResults, HashSet<String> visited) {
+        List<Vulnerability> vulns = new ArrayList<>();
+        if (visited.add(dependency.toCoordinate())) {
+            // dependency vulnerabilities not already collected
+            vulns.addAll(uniqueScanResults.get(dependency.toCoordinate()).getVulnerabilities());
+            dependency.getChildren().forEach(child -> {
+                vulns.addAll(collectVulnerabilities(child, uniqueScanResults, visited));
+            });
+        }
+        return vulns;
+    }
+
 }

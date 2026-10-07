@@ -3,6 +3,8 @@ package com.focalsca.model;
 import lombok.Getter;
 import lombok.Setter;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 @Getter
@@ -11,26 +13,29 @@ public class Dependency {
     private final String groupId;
     private final String artifactId;
     private final String version;
+    private final String file;
+    private final Integer line;
+    private Dependency parent;
+    private final List<Dependency> children = new ArrayList<>();
 
     @Setter
     private String bestFixVersion;
 
-    @Setter
-    private Dependency parent;
-
-    private Dependency(String groupId, String artifactId, String version) {
+    private Dependency(String groupId, String artifactId, String version, String file, Integer line) {
         this.groupId = groupId;
         this.artifactId = artifactId;
         this.version = version;
+        this.file = file;
+        this.line = line;
         this.parent = null;
     }
 
-    public static Dependency fromCoordinate(String coordinate) {
+    public static Dependency fromCoordinate(String coordinate, String file, Integer line) {
         String[] parts = coordinate.split(":");
         if (parts.length != 3) {
             throw new IllegalArgumentException("Invalid dependency coordinate: " + coordinate);
         }
-        return new Dependency(parts[0], parts[1], parts[2]);
+        return new Dependency(parts[0], parts[1], parts[2], file, line);
     }
 
     public boolean isDirect() { return this.parent == null; }
@@ -71,4 +76,8 @@ public class Dependency {
         return toCoordinate();
     }
 
+    public void addChild(Dependency dependency) {
+        dependency.parent = this;
+        children.add(dependency);
+    }
 }

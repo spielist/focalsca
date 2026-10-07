@@ -4,6 +4,7 @@ import com.focalsca.model.DependencyScanResult;
 import com.focalsca.model.Severity;
 import com.focalsca.model.Vulnerability;
 
+import java.io.File;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -13,12 +14,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-public class ConsoleReporter {
+public class ConsoleReporter implements IReporter {
 
-    public void report(List<DependencyScanResult> results) {
+    @Override
+    public void report(List<DependencyScanResult> scanResults, File reportFile) throws Exception {
 
-        long totalScanned = results.size();
-        long directCount = results.stream().filter(r -> r.getDependency().isDirect()).count();
+        long totalScanned = scanResults.size();
+        long directCount = scanResults.stream().filter(r -> r.getDependency().isDirect()).count();
         long transitiveCount = totalScanned - directCount;
 
         System.out.println();
@@ -27,7 +29,7 @@ public class ConsoleReporter {
         System.out.println("===========================================");
 
         // Group all scan results by their root dependency coordinate
-        Map<String, List<DependencyScanResult>> byRoot = results.stream()
+        Map<String, List<DependencyScanResult>> byRoot = scanResults.stream()
                 .collect(Collectors.groupingBy(
                         r -> r.getDependency().getRootDependency().toCoordinate(),
                         LinkedHashMap::new,
@@ -91,7 +93,7 @@ public class ConsoleReporter {
 
         // Severity summary — count across all unique vulnerable coordinates
         Set<String> counted = new LinkedHashSet<>();
-        List<Vulnerability> allVulns = results.stream()
+        List<Vulnerability> allVulns = scanResults.stream()
                 .filter(r -> counted.add(r.getDependency().toCoordinate()))
                 .flatMap(r -> r.getVulnerabilities().stream())
                 .toList();

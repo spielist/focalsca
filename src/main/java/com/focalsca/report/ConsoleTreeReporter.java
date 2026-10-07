@@ -5,6 +5,7 @@ import com.focalsca.model.DependencyScanResult;
 import com.focalsca.model.Severity;
 import com.focalsca.model.Vulnerability;
 
+import java.io.File;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -16,16 +17,16 @@ import java.util.stream.Collectors;
 
 import com.focalsca.scanner.FixVersionResult;
 import com.focalsca.util.VersionUtils;
-import org.apache.maven.artifact.versioning.ComparableVersion;
 
-public class ConsoleTreeReporter {
+public class ConsoleTreeReporter implements IReporter {
 
     private static final String BRANCH     = "├── ";
     private static final String LAST       = "└── ";
     private static final String VERTICAL   = "│   ";
     private static final String INDENT     = "    ";
 
-    public void report(List<DependencyScanResult> results) {
+    @Override
+    public void report(List<DependencyScanResult> results, File reportFile) throws Exception {
 
         long totalScanned = results.size();
         long directCount = results.stream().filter(r -> r.getDependency().isDirect()).count();

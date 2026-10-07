@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.focalsca.model.Dependency;
 import com.focalsca.model.Severity;
 import com.focalsca.model.Vulnerability;
+import lombok.extern.slf4j.Slf4j;
+import us.springett.cvss.Cvss;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -15,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+@Slf4j
 public class OsvClient {
 
     private static final String OSV_QUERY_URL = "https://api.osv.dev/v1/query";
@@ -52,28 +55,37 @@ public class OsvClient {
     private List<Vulnerability> parseResponse(String responseBody, Dependency dependency) throws Exception {
 
         List<Vulnerability> results = new ArrayList<>();
-        JsonNode root = objectMapper.readTree(responseBody);
-        JsonNode vulns = root.path("vulns");
 
-        if (vulns.isMissingNode() || !vulns.isArray()) {
-            return Collections.emptyList();
-        }
+        try {
 
-        for (JsonNode vuln : vulns) {
+            JsonNode root = objectMapper.readTree(responseBody);
+            JsonNode vulns = root.path("vulns");
 
-            String id = vuln.path("id").asText();
-            String summary = vuln.path("summary").asText(null);
-            String details = vuln.path("details").asText(null);
-
-            List<String> aliases = new ArrayList<>();
-            for (JsonNode alias : vuln.path("aliases")) {
-                aliases.add(alias.asText());
+            if (vulns.isMissingNode() || !vulns.isArray()) {
+                return Collections.emptyList();
             }
 
-            Severity severity = parseSeverity(vuln);
-            List<String> fixedVersions = parseFixedVersions(vuln);
+            for (JsonNode vuln : vulns) {
 
-            results.add(new Vulnerability(id, aliases, summary, details, severity, fixedVersions, dependency));
+                String id = vuln.path("id").asText();
+                String summary = vuln.path("summary").asText(null);
+                String details = vuln.path("details").asText(null);
+
+                List<String> aliases = new ArrayList<>();
+                for (JsonNode alias : vuln.path("aliases")) {
+                    aliases.add(alias.asText());
+                }
+
+                Severity severity = parseSeverity(vuln);
+                List<String> fixedVersions = parseFixedVersions(vuln);
+
+                results.add(new Vulnerability(id, aliases, summary, details, severity, fixedVersions, dependency));
+            }
+
+        } catch (Exception e) {
+
+            log.error("Error parsing response from OSV.dev: {}", responseBody);
+
         }
 
         return results;
@@ -83,8 +95,9 @@ public class OsvClient {
         // Try CVSS score from severity array first
         JsonNode severityArray = vuln.path("severity");
         for (JsonNode s : severityArray) {
-            String score = s.path("score").asText("");
-            double cvssScore = parseCvssScore(score);
+            String type = s.path("type").asText("");
+            if (!type.equals("CVSS_V3") && !type.equals("CVSS_V2")) continue; // skip CVSS_V4 etc.
+            double cvssScore = parseCvssScore(s.path("score").asText(""));
             if (cvssScore >= 9.0) return Severity.CRITICAL;
             if (cvssScore >= 7.0) return Severity.HIGH;
             if (cvssScore >= 4.0) return Severity.MEDIUM;
@@ -102,13 +115,17 @@ public class OsvClient {
         };
     }
 
-    private double parseCvssScore(String cvssVector) {
-        // CVSS vectors don't embed the numeric score directly —
-        // OSV sometimes puts the numeric score in the score field directly
+    private double parseCvssScore(String score) {
+        // OSV usually supplies a vector string; occasionally a bare number
         try {
-            return Double.parseDouble(cvssVector);
-        } catch (NumberFormatException e) {
-            return 0.0;
+            return Double.parseDouble(score);          // bare numeric score
+        } catch (NumberFormatException ignored) {
+            try {
+                Cvss cvss = Cvss.fromVector(score);
+                return cvss != null ? cvss.calculateScore().getBaseScore() : 0.0;
+            } catch (RuntimeException e) {   // MalformedVectorException
+                return 0.0;
+            }
         }
     }
 

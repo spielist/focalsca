@@ -6,20 +6,60 @@ allprojects {
                 if (!outputPath) {
                     throw new GradleException("scanOutputPath property not set")
                 }
-                def list = [] // as Set
+                def buildFile = project.buildFile
+                def lines = buildFile.exists() ? buildFile.readLines() : []
+                def uri = project.rootDir.toPath()
+                        .relativize(buildFile.toPath()).toString().replace('\\', '/')
+
+                def roots = []
                 project.configurations.findByName("runtimeClasspath")?.resolvedConfiguration
-                        ?.firstLevelModuleDependencies?.each { dep -> collectDep(dep, list, null, 0) }
-                new File(outputPath).text = groovy.json.JsonOutput.toJson(list) // as List)
+                        ?.firstLevelModuleDependencies?.each { dep ->
+                    roots << toNode(dep, uri, findLine(lines, dep), [])
+                }
+
+                def outDir = new File(outputPath)
+                outDir.mkdirs()
+                def name = project.path == ':' ? 'root' : project.path.substring(1).replace(':', '_')
+                new File(outDir, "${name}.json").text = groovy.json.JsonOutput.toJson(roots)
+            }
+        }
+        project.tasks.register("resolveCandidates") {
+            doLast {
+                def outputPath = project.findProperty("scanOutputPath")
+                if (!outputPath) {
+                    throw new GradleException("scanOutputPath property not set")
+                }
+
+                def candidates = (project.findProperty("fixCandidates") ?: "").split(",").findAll { it }
+                def roots = []
+                candidates.each { coord ->
+                    def cfg = project.configurations.detachedConfiguration(project.dependencies.create(coord))
+                    cfg.resolvedConfiguration.lenientConfiguration.firstLevelModuleDependencies.each { dep ->
+                        roots << toNode(dep, null, null, [])
+                    }
+                }
+
+                def outDir = new File(outputPath)
+                outDir.mkdirs()
+                def name = project.path == ':' ? 'root' : project.path.substring(1).replace(':', '_')
+                new File(outDir, "${name}.json").text = groovy.json.JsonOutput.toJson(roots)
             }
         }
     }
 }
 
-def collectDep(dep, list, parentId, level) {
-    def id = "${dep.moduleGroup}:${dep.moduleName}:${dep.moduleVersion}"
-    list << [id: id, parent: parentId, level: level]
-    dep.children.each { child -> collectDep(child, list, id, level + 1) }
-//    if (seen.add(id)) {              // Set.add returns false if already present
-//        dep.children.each { child -> collectDep(child, seen, level + 1) }
-//    }
+def findLine(lines, dep) {
+    // prefer a line containing both group and name, fall back to name only
+    def idx = lines.findIndexOf { it.contains(dep.moduleGroup) && it.contains(dep.moduleName) }
+    if (idx < 0) idx = lines.findIndexOf { it.contains(dep.moduleName) }
+    idx < 0 ? null : idx + 1   // SARIF lines are 1-based
+}
+
+// Builds a nested node: the dependency plus its transitive children.
+// `path` holds the ids from the root down to this node, to stop on a cycle.
+def toNode(dep, uri, line, path) {
+    def id = "${dep.moduleGroup}:${dep.moduleName}:${dep.moduleVersion}".toString()
+    def children = path.contains(id) ? []
+            : dep.children.collect { child -> toNode(child, uri, line, path + id) }
+    [id: id, file: uri, line: line, children: children]
 }
