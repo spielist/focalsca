@@ -6,13 +6,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.focalsca.model.Dependency;
 import com.focalsca.model.Severity;
 import com.focalsca.model.Vulnerability;
+import com.focalsca.util.VersionUtils;
 import lombok.extern.slf4j.Slf4j;
 import us.springett.cvss.Cvss;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -25,31 +28,26 @@ public class OsvClient {
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public List<Vulnerability> query(Dependency dependency) {
+    public List<Vulnerability> query(Dependency dependency) throws Exception {
 
-        try {
-            String requestBody = objectMapper.writeValueAsString(new OsvQueryRequest(dependency));
+        String requestBody = objectMapper.writeValueAsString(new OsvQueryRequest(dependency));
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(OSV_QUERY_URL))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .build();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(OSV_QUERY_URL))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(10))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            if (response.statusCode() != 200) {
-                System.err.println("OSV.dev returned status " + response.statusCode()
-                        + " for " + dependency.toCoordinate());
-                return Collections.emptyList();
-            }
-
-            return parseResponse(response.body(), dependency);
-
-        } catch (Exception e) {
-            System.err.println("Error querying OSV.dev for " + dependency.toCoordinate() + ": " + e.getMessage());
-            return Collections.emptyList();
+        if (response.statusCode() != 200) {
+            throw new IOException("OSV.dev returned status " + response.statusCode()
+                    + " for " + dependency.toCoordinate());
         }
+
+        return parseResponse(response.body(), dependency);
+
     }
 
     private List<Vulnerability> parseResponse(String responseBody, Dependency dependency) throws Exception {
@@ -76,46 +74,60 @@ public class OsvClient {
                     aliases.add(alias.asText());
                 }
 
-                Severity severity = parseSeverity(vuln);
-                List<String> fixedVersions = parseFixedVersions(vuln);
+                Double score = parseCvssScore(vuln);
+                Severity severity = parseSeverity(vuln, score);
+                List<String> fixedVersions = parseFixedVersions(dependency, vuln);
 
-                results.add(new Vulnerability(id, aliases, summary, details, severity, fixedVersions, dependency));
+                results.add(new Vulnerability(id, aliases, summary, details, score, severity, fixedVersions, dependency));
             }
 
         } catch (Exception e) {
-
-            log.error("Error parsing response from OSV.dev: {}", responseBody);
-
+            throw new Exception(dependency.toCoordinate() + ": error parsing response from OSV.dev", e);
         }
 
         return results;
+
     }
 
-    private Severity parseSeverity(JsonNode vuln) {
-        // Try CVSS score from severity array first
-        JsonNode severityArray = vuln.path("severity");
-        for (JsonNode s : severityArray) {
+    private Double parseCvssScore(JsonNode vuln) {
+        Double v3 = null;
+        Double v2 = null;
+        for (JsonNode s : vuln.path("severity")) {
             String type = s.path("type").asText("");
-            if (!type.equals("CVSS_V3") && !type.equals("CVSS_V2")) continue; // skip CVSS_V4 etc.
-            double cvssScore = parseCvssScore(s.path("score").asText(""));
-            if (cvssScore >= 9.0) return Severity.CRITICAL;
-            if (cvssScore >= 7.0) return Severity.HIGH;
-            if (cvssScore >= 4.0) return Severity.MEDIUM;
-            if (cvssScore > 0.0)  return Severity.LOW;
+            if (!type.equals("CVSS_V3") && !type.equals("CVSS_V2")) continue;   // skip CVSS_V4 etc.
+            Double score = parseCvssScore(s.path("score").asText(""));
+            if (score == null) continue;                                         // unparseable entry
+            if (type.equals("CVSS_V3")) {
+                v3 = (v3 == null) ? score : Math.max(v3, score);
+            } else {
+                v2 = (v2 == null) ? score : Math.max(v2, score);
+            }
         }
-        // Fall back to database_specific severity if present
-        JsonNode dbSpecific = vuln.path("database_specific");
-        String sev = dbSpecific.path("severity").asText("");
-        return switch (sev.toUpperCase()) {
-            case "CRITICAL" -> Severity.CRITICAL;
-            case "HIGH"     -> Severity.HIGH;
-            case "MEDIUM", "MODERATE" -> Severity.MEDIUM;
-            case "LOW"      -> Severity.LOW;
-            default         -> Severity.MEDIUM; // conservative default
-        };
+        return v3 != null ? v3 : v2;
     }
 
-    private double parseCvssScore(String score) {
+    private Severity parseSeverity(JsonNode vuln, Double score) {
+        // Try to use CVSS score first
+        if(score != null) {
+            if (score >= 9.0) return Severity.CRITICAL;
+            if (score >= 7.0) return Severity.HIGH;
+            if (score >= 4.0) return Severity.MEDIUM;
+            return Severity.LOW;
+        } else {
+            // Fall back to database_specific severity if present
+            JsonNode dbSpecific = vuln.path("database_specific");
+            String sev = dbSpecific.path("severity").asText("");
+            return switch (sev.toUpperCase()) {
+                case "CRITICAL" -> Severity.CRITICAL;
+                case "HIGH" -> Severity.HIGH;
+                case "MEDIUM", "MODERATE" -> Severity.MEDIUM;
+                case "LOW" -> Severity.LOW;
+                default -> Severity.MEDIUM; // conservative default
+            };
+        }
+    }
+
+    private Double parseCvssScore(String score) {
         // OSV usually supplies a vector string; occasionally a bare number
         try {
             return Double.parseDouble(score);          // bare numeric score
@@ -124,19 +136,24 @@ public class OsvClient {
                 Cvss cvss = Cvss.fromVector(score);
                 return cvss != null ? cvss.calculateScore().getBaseScore() : 0.0;
             } catch (RuntimeException e) {   // MalformedVectorException
-                return 0.0;
+                return null;
             }
         }
     }
 
-    private List<String> parseFixedVersions(JsonNode vuln) {
+    private List<String> parseFixedVersions(Dependency dependency, JsonNode vuln) {
         List<String> fixedVersions = new ArrayList<>();
         for (JsonNode affected : vuln.path("affected")) {
             for (JsonNode range : affected.path("ranges")) {
                 if ("ECOSYSTEM".equals(range.path("type").asText())) {
                     for (JsonNode event : range.path("events")) {
                         if (event.has("fixed")) {
-                            fixedVersions.add(event.path("fixed").asText());
+                            String fixedVersion = event.path("fixed").asText();
+                            if (VersionUtils.isSafeVersion(fixedVersion)) {
+                                fixedVersions.add(fixedVersion);
+                            } else {
+                                log.warn("{}: Ignoring malformed fixed version from OSV: {}", dependency.toCoordinate(), fixedVersion);
+                            }
                         }
                     }
                 }

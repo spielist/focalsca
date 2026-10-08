@@ -167,29 +167,13 @@ public class ConsoleTreeReporter implements IReporter {
     private void printVulnerability(Vulnerability v, String connector, String continuation) {
         String severityLabel = String.format("[%-8s]", v.getSeverity());
         String summary = v.getSummary() != null ? " — " + v.getSummary() : "";
-        String reachability = v.getReachabilityResult().isAnalyzed()
-                ? " [" + v.getReachabilityResult().getStatus() + "]"
-                : "";
-        System.out.println(connector + severityLabel + " " + v.getCveId() + summary + reachability);
-
-        if (v.getReachabilityResult().isReachable()) {
-            v.getReachabilityResult().getReachableVia()
-                    .forEach(ep -> System.out.println(continuation + "Via: " + ep));
-        }
+        System.out.println(connector + severityLabel + " " + v.getCveId() + summary);
     }
 
     private List<Vulnerability> sorted(List<Vulnerability> vulns) {
         return vulns.stream()
                 .sorted(Comparator.comparing(Vulnerability::getSeverity))
                 .collect(Collectors.toList());
-    }
-
-    private int majorVersion(String version) {
-        try {
-            return Integer.parseInt(version.split("[.\\-]")[0]);
-        } catch (NumberFormatException e) {
-            return -1; // unparseable — exclude it
-        }
     }
 
 }

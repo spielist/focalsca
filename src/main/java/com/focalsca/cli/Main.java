@@ -14,12 +14,14 @@ import java.util.stream.Stream;
 
 import com.focalsca.fix.BuildFileRewriter;
 import com.focalsca.model.*;
+import com.focalsca.report.ConsoleReporter;
 import com.focalsca.report.ConsoleTreeReporter;
 import com.focalsca.report.IReporter;
 import com.focalsca.report.SarifReporter;
 import com.focalsca.scanner.DependencyScanner;
 import com.focalsca.parser.DependencyParser;
 import com.focalsca.scanner.FixVersionResult;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.file.PathUtils;
 import org.gradle.tooling.GradleConnector;
 import org.gradle.tooling.ProjectConnection;
@@ -28,11 +30,17 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.ITypeConverter;
 
+@Slf4j
 @Command
 public class Main implements Callable<Integer> {
 
     public static void main(String[] args) {
-        System.exit(new CommandLine(new Main()).execute(args));
+        CommandLine cmd = new CommandLine(new Main())
+                .setExecutionExceptionHandler((ex, commandLine, parseResult) -> {
+                    commandLine.getErr().println("FocalSCA scan failed: " + ex.getMessage());
+                    return 2;
+                });
+        System.exit(cmd.execute(args));
     }
 
     @Option(names = "--project", required = true, description = "Path to Gradle project")
@@ -47,8 +55,8 @@ public class Main implements Callable<Integer> {
     @Option(names = "--warn-only")
     boolean warnOnly;
 
-    @Option(names = "--cache-dir")
-    Path cacheDir;
+    @Option(names = "--work-dir")
+    Path workDir;
 
     @Option(names = "--upgrade-policy", defaultValue = "SAME_MAJOR",
             converter = UpgradePolicyConverter.class,
@@ -62,67 +70,83 @@ public class Main implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
 
-        Path tempPath = Paths.get("temp");
+        Path initScript = null;
 
-        Path initScript = Files.createTempFile(tempPath, "init", ".gradle");
-        try (InputStream inputStream = Main.class.getResourceAsStream("/init-script.gradle")) {
-            Files.copy(inputStream, initScript, StandardCopyOption.REPLACE_EXISTING);
-        }
+        try {
 
-        Path outputPath = Files.createTempDirectory(tempPath, "dependencies");
-        loadProject("listDependencies", initScript, outputPath, "");
+            if (workDir == null) {
+                workDir = Paths.get("temp");
+            }
+            Path tempPath = Files.createDirectories(workDir);
 
-        List<Dependency> dependencyList = runParser(outputPath.toAbsolutePath());
-        List<DependencyScanResult> scannerResults = runScanner(dependencyList);
-        runReporter(scannerResults, "results.sarif");
+            initScript = Files.createTempFile(tempPath, "init", ".gradle");
+            try (InputStream inputStream = Main.class.getResourceAsStream("/init-script.gradle")) {
+                Files.copy(inputStream, initScript, StandardCopyOption.REPLACE_EXISTING);
+            }
 
-        if(fixMode.isEnabled() && (upgradePolicy == UpgradePolicy.ANY || upgradePolicy == UpgradePolicy.SAME_MAJOR)) {
+            Path outputPath = Files.createTempDirectory(tempPath, "dependencies");
+            loadProject("listDependencies", initScript, outputPath, "");
 
-            List<DependencyFix> fixes = getDependencyFixes(scannerResults);
+            List<Dependency> dependencyList = runParser(outputPath.toAbsolutePath());
+            List<DependencyScanResult> scannerResults = runScanner(dependencyList);
+            runReporter(scannerResults, "results.sarif");
 
-            if(!fixes.isEmpty()) {
+            if (fixMode.isEnabled() && (upgradePolicy == UpgradePolicy.ANY || upgradePolicy == UpgradePolicy.SAME_MAJOR)) {
 
-                String fixCandidates = fixes.stream().map(fix ->
-                        String.join(":", fix.getOriginal().getGroupId(), fix.getOriginal().getArtifactId(), fix.getNewVersion()))
-                        .distinct().collect(Collectors.joining(","));
+                List<DependencyFix> fixes = getDependencyFixes(scannerResults);
 
-                // second Gradle invocation: resolveCandidates
-                Path candidateDir = Files.createTempDirectory(tempPath, "fixcandidates");
-                loadProject("resolveCandidates", initScript, candidateDir, fixCandidates);
+                if (!fixes.isEmpty()) {
 
-                List<Dependency> candidates = runParser(candidateDir.toAbsolutePath());
+                    String fixCandidates = fixes.stream()
+                            .map(fix -> String.join(":", fix.getOriginal().getGroupId(),
+                                    fix.getOriginal().getArtifactId(), fix.getNewVersion()))
+                            .distinct()
+                            .collect(Collectors.joining(","));
 
-                if (fixMode.verifies()) {
-                    List<DependencyScanResult> candidateResults = runScanner(candidates);
-                    runReporter(candidateResults, "fixcandidates.sarif");
-                }
+                    // second Gradle invocation: resolveCandidates
+                    Path candidateDir = Files.createTempDirectory(tempPath, "fixcandidates");
+                    loadProject("resolveCandidates", initScript, candidateDir, fixCandidates);
 
-                if (fixMode.applies()) {
-                    Set<String> resolved = candidates.stream()
-                            .map(Dependency::toCoordinate)
-                            .collect(Collectors.toSet());
-                    fixes.removeIf(fix -> !resolved.contains(String.join(":",
-                            fix.getOriginal().getGroupId(),
-                            fix.getOriginal().getArtifactId(),
-                            fix.getNewVersion())));
-                    new BuildFileRewriter().rewrite(projectPath, tempPath, fixes);
+                    List<Dependency> candidates = runParser(candidateDir.toAbsolutePath());
+
+                    if (fixMode.verifies()) {
+                        List<DependencyScanResult> candidateResults = runScanner(candidates);
+                        runReporter(candidateResults, "fixcandidates.sarif");
+                    }
+
+                    if (fixMode.applies()) {
+                        Set<String> resolved = candidates.stream()
+                                .map(Dependency::toCoordinate)
+                                .collect(Collectors.toSet());
+                        fixes.removeIf(fix -> !resolved.contains(String.join(":",
+                                fix.getOriginal().getGroupId(),
+                                fix.getOriginal().getArtifactId(),
+                                fix.getNewVersion())));
+                        new BuildFileRewriter().rewrite(projectPath, tempPath, fixes);
+                    }
                 }
             }
+
+
+            if (warnOnly) return 0;
+
+            boolean failingVulnFound = scannerResults.stream()
+                    .flatMap(r -> r.getVulnerabilities().stream())
+                    .anyMatch(v -> v.getSeverity().compareTo(failOn) <= 0);
+
+            return failingVulnFound ? 1 : 0;
+
+        } finally {
+
+            if(initScript != null) {
+                PathUtils.delete(initScript);
+            }
+
         }
-
-        PathUtils.delete(initScript);
-
-        if (warnOnly) return 0;
-
-        boolean failingVulnFound = scannerResults.stream()
-                .flatMap(r -> r.getVulnerabilities().stream())
-                .anyMatch(v -> v.getSeverity().compareTo(failOn) <= 0);
-
-        return failingVulnFound ? 1 : 0;
 
     }
 
-    private void loadProject(String task, Path initScript, Path outputPath, String coordinates) throws Exception {
+    private void loadProject(String task, Path initScript, Path outputPath, String coordinates) {
         try (ProjectConnection connection = GradleConnector.newConnector()
                 .forProjectDirectory(new File(projectPath.toAbsolutePath().toString()))
                 .connect()) {
@@ -146,19 +170,20 @@ public class Main implements Callable<Integer> {
                     throw new RuntimeException(e);
                 }
             });
+        } finally {
+            PathUtils.delete(outDir);
         }
-        PathUtils.delete(outDir);
         return dependencyList;
     }
 
-    private List<DependencyScanResult> runScanner(List<Dependency> dependencyList) {
-        return new DependencyScanner().scan(dependencyList, upgradePolicy);
+    private List<DependencyScanResult> runScanner(List<Dependency> dependencyList) throws Exception {
+        return new DependencyScanner().scan(dependencyList);
     }
 
     private void runReporter(List<DependencyScanResult> scannerResults, String fileName) throws Exception {
-        IReporter reporter = switch(outputFormat) {
-            case CONSOLE -> new ConsoleTreeReporter();
-            case SARIF -> new SarifReporter();
+        IReporter reporter = switch (outputFormat) {
+            case CONSOLE -> new ConsoleReporter();
+            case CONSOLE_TREE -> new ConsoleTreeReporter();
             default -> new SarifReporter();
         };
         reporter.report(scannerResults, new File(fileName));

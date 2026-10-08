@@ -1,5 +1,5 @@
 package com.focalsca.model;
 
 public enum OutputFormat {
-    CONSOLE, HTML, JSON, SARIF
+    CONSOLE, CONSOLE_TREE, HTML, JSON, SARIF
 }

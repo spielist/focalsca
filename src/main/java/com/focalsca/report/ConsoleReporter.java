@@ -120,17 +120,7 @@ public class ConsoleReporter implements IReporter {
     private String formatVulnerability(Vulnerability v, String indent) {
         String severityLabel = String.format("[%-8s]", v.getSeverity());
         String summary = v.getSummary() != null ? " — " + v.getSummary() : "";
-        String reachability = v.getReachabilityResult().isAnalyzed()
-                ? " [" + v.getReachabilityResult().getStatus() + "]"
-                : "";
-        StringBuilder sb = new StringBuilder();
-        sb.append(indent).append(severityLabel).append(" ").append(v.getCveId())
-                .append(summary).append(reachability);
-        if (v.getReachabilityResult().isReachable()) {
-            v.getReachabilityResult().getReachableVia()
-                    .forEach(ep -> sb.append("\n").append(indent).append("  Via: ").append(ep));
-        }
-        return sb.toString();
+        return indent + severityLabel + " " + v.getCveId() + summary;
     }
 
     private List<Vulnerability> sorted(List<Vulnerability> vulns) {

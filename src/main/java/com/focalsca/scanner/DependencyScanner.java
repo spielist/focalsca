@@ -8,28 +8,35 @@ import com.focalsca.model.DependencyScanResult;
 import com.focalsca.model.UpgradePolicy;
 import com.focalsca.model.Vulnerability;
 import com.focalsca.util.VersionUtils;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.maven.artifact.versioning.ComparableVersion;
 
+@Slf4j
 public class DependencyScanner {
 
-    public List<DependencyScanResult> scan(List<Dependency> dependencyList, UpgradePolicy upgradePolicy) {
+    public List<DependencyScanResult> scan(List<Dependency> dependencyList) throws Exception {
 
         OsvClient osv = new OsvClient();
         HashMap<String, DependencyScanResult> uniqueScanResults = new HashMap<>();
 
         List<DependencyScanResult> list = dependencyList.stream()
-                .flatMap(DependencyScanner::flatten)
-                .map(dependency -> {
-                    DependencyScanResult prevResult = uniqueScanResults.get(dependency.toCoordinate());
-                    if (prevResult == null) {
-                        List<Vulnerability> vulns = osv.query(dependency);
-                        DependencyScanResult result = new DependencyScanResult(dependency, vulns);
-                        uniqueScanResults.put(dependency.toCoordinate(), result);
-                        return result;
-                    } else {
-                        return new DependencyScanResult(dependency, prevResult.getVulnerabilities());
+            .flatMap(DependencyScanner::flatten)
+            .map(dependency -> {
+                DependencyScanResult prevResult = uniqueScanResults.get(dependency.toCoordinate());
+                if (prevResult == null) {
+                    List<Vulnerability> vulns;
+                    try {
+                        vulns = osv.query(dependency);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                }).toList();
+                    DependencyScanResult result = new DependencyScanResult(dependency, vulns);
+                    uniqueScanResults.put(dependency.toCoordinate(), result);
+                    return result;
+                } else {
+                    return new DependencyScanResult(dependency, prevResult.getVulnerabilities());
+                }
+            }).toList();
 
         list.forEach(result -> {
             Dependency dependency = result.getDependency();
@@ -59,8 +66,8 @@ public class DependencyScanner {
                                               int depth, Set<String> visited,
                                               UpgradePolicy upgradePolicy) {
 
-//        System.out.println("getBestFixVersion called for: " + result.getDependency().toCoordinate()
-//                + " depth=" + depth + " vulns=" + result.getVulnerabilities().size());
+        log.debug("{}: getBestFixVersion called with depth={} vulns={}",
+                result.getDependency().toCoordinate(), depth, result.getVulnerabilities().size());
 
         int installedMajor = VersionUtils.majorVersion(result.getDependency().getVersion());
 
@@ -70,8 +77,8 @@ public class DependencyScanner {
                 .filter(v -> upgradePolicy == UpgradePolicy.ANY || VersionUtils.majorVersion(v) == installedMajor)
                 .max(Comparator.comparing(ComparableVersion::new));
 
-//        System.out.println("fixVersion result: " + fixVersion + " installedMajor=" + installedMajor
-//                + " upgradePolicy=" + upgradePolicy);
+        log.debug("{}: fixVersion={} installedMajor={} upgradePolicy={}",
+                result.getDependency().toCoordinate(), fixVersion, installedMajor, upgradePolicy);
 
         if (fixVersion.isEmpty()) {
             return null;
@@ -91,18 +98,25 @@ public class DependencyScanner {
                 result.getDependency().getLine()
         );
 
-        List<Vulnerability> fixVulns = osv.query(fixCandidate);
+        try {
+            List<Vulnerability> fixVulns = osv.query(fixCandidate);
 
-        if (fixVulns.isEmpty()) {
-            return new FixVersionResult(candidate, Collections.emptyList()); // clean
+            if (fixVulns.isEmpty()) {
+                return new FixVersionResult(candidate, Collections.emptyList()); // clean
+            }
+
+            // Fix version has its own vulnerabilities — recurse to find better
+            FixVersionResult betterFix = getBestFixVersion(osv, new DependencyScanResult(fixCandidate, fixVulns),
+                    depth + 1, visited, upgradePolicy);
+
+            // If no better fix found, return the candidate we have with its vuln count
+            return betterFix != null ? betterFix : new FixVersionResult(candidate, fixVulns);
+
+        } catch (Exception e) {
+            log.warn("{}: could not determine best fix version", result.getDependency().toCoordinate(), e);
+            return null;
         }
 
-        // Fix version has its own vulnerabilities — recurse to find better
-        FixVersionResult betterFix = getBestFixVersion(osv, new DependencyScanResult(fixCandidate, fixVulns),
-                depth + 1, visited, upgradePolicy);
-
-        // If no better fix found, return the candidate we have with its vuln count
-        return betterFix != null ? betterFix : new FixVersionResult(candidate, fixVulns);
     }
 
     private List<Vulnerability> collectVulnerabilities(Dependency dependency, HashMap<String, DependencyScanResult> uniqueScanResults, HashSet<String> visited) {
